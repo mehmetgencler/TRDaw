@@ -1,0 +1,6 @@
+{
+  "name": "WaveForge Studio - 4-Track Browser Audio Mixer",
+  "description": "Professional multi-track browser DAW engineered for 1GB WAV stems with channel strip DSP, aux reverb, master limiter, and mixdown export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

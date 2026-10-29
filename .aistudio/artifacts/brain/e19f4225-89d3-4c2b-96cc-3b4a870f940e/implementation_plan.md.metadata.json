@@ -1,0 +1,6 @@
+{
+  "summary":  "Revised implementation plan for WaveForge Studio optimized for iOS Mobile Safari, Chrome, and Desktop browsers. Features chunked slice streaming (never exceeding 50MB RAM to prevent iOS Jetsam memory kills), iOS WebKit AudioContext touch unlock, touch-friendly fader/knob ergonomics, responsive mobile carousel + desktop console layout, and chunked WAV mixdown rendering.",
+  "updatedAt":  "2026-10-25T20:52:52.619866140Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

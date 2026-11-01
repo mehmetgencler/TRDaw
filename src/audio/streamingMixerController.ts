@@ -35,6 +35,101 @@ export class HotSwapDecodeError extends Error {
   }
 }
 
+/**
+ * Explicitly demuxes full, complete MP3 frames from a bounded byte buffer
+ * without cutting any frame in the middle or interpreting arbitrary byte counts.
+ */
+function extractValidatedMp3FrameSlice(buf: Uint8Array, targetSampleFrames = 12000): Uint8Array {
+  let offset = 0;
+  if (buf.length >= 10 && buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) {
+    const id3Size =
+      ((buf[6] & 0x7F) << 21) |
+      ((buf[7] & 0x7F) << 14) |
+      ((buf[8] & 0x7F) << 7) |
+      (buf[9] & 0x7F);
+    offset = 10 + id3Size;
+  }
+
+  let totalSamples = 0;
+  let lastValidByteEnd = offset;
+  const MP3_BITRATES = [0, 32000, 40000, 48000, 56000, 64000, 80000, 96000, 112000, 128000, 160000, 192000, 224000, 256000, 320000, 0];
+  const MP3_SAMPLE_RATES = [44100, 48000, 32000, 0];
+
+  while (offset + 4 <= buf.length) {
+    const b0 = buf[offset];
+    const b1 = buf[offset + 1];
+    if (b0 !== 0xFF || (b1 & 0xE0) !== 0xE0) {
+      offset++;
+      continue;
+    }
+
+    const version = (b1 >> 3) & 0x03;
+    const layer = (b1 >> 1) & 0x03;
+    const b2 = buf[offset + 2];
+    const bitrateIdx = (b2 >> 4) & 0x0F;
+    const sampleRateIdx = (b2 >> 2) & 0x03;
+    const padding = (b2 >> 1) & 0x01;
+
+    if (version !== 3 || layer !== 1 || bitrateIdx === 0 || bitrateIdx === 15 || sampleRateIdx === 3) {
+      offset++;
+      continue;
+    }
+
+    const bitrate = MP3_BITRATES[bitrateIdx];
+    const sampleRate = MP3_SAMPLE_RATES[sampleRateIdx];
+    const frameLength = Math.floor((144 * bitrate) / sampleRate) + padding;
+
+    if (offset + frameLength > buf.length) {
+      break; // Stop cleanly at last complete frame boundary
+    }
+
+    offset += frameLength;
+    lastValidByteEnd = offset;
+    totalSamples += 1152;
+    if (totalSamples >= targetSampleFrames) {
+      break;
+    }
+  }
+
+  return buf.subarray(0, lastValidByteEnd);
+}
+
+/**
+ * Explicitly demuxes full, complete ADTS AAC frames from a bounded byte buffer.
+ */
+function extractValidatedAdtsFrameSlice(buf: Uint8Array, targetSampleFrames = 12000): Uint8Array {
+  let offset = 0;
+  let totalSamples = 0;
+  let lastValidByteEnd = 0;
+
+  while (offset + 7 <= buf.length) {
+    const b0 = buf[offset];
+    const b1 = buf[offset + 1];
+    if (b0 !== 0xFF || (b1 & 0xF0) !== 0xF0) {
+      offset++;
+      continue;
+    }
+
+    const frameLength =
+      ((buf[offset + 3] & 0x03) << 11) |
+      (buf[offset + 4] << 3) |
+      ((buf[offset + 5] & 0xE0) >> 5);
+
+    if (frameLength < 7 || offset + frameLength > buf.length) {
+      break; // Stop cleanly at last complete frame boundary
+    }
+
+    offset += frameLength;
+    lastValidByteEnd = offset;
+    totalSamples += 1024;
+    if (totalSamples >= targetSampleFrames) {
+      break;
+    }
+  }
+
+  return buf.subarray(0, lastValidByteEnd);
+}
+
 export interface StreamingTrackSource {
   id: string;
   index: number;
@@ -351,12 +446,20 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
     return this.workletNode;
   }
 
+  public hasActiveTracks(): boolean {
+    return this.tracks.some(t => t.active);
+  }
+
   /**
    * Sets or updates audio source for a given track index (0 to 3)
    */
   public setTrackSource(index: number, blob: Blob | null, header: ParsedWavHeader | null): void {
     if (index < 0 || index >= 4) return;
     const t = this.tracks[index];
+    // If setting identical source, preserve existing seek and read position
+    if (t.blob === blob && t.header === header && t.active) {
+      return;
+    }
     t.blob = blob;
     t.header = header;
     t.active = !!(blob && header);
@@ -419,7 +522,11 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
     }
 
     const sampleRate = this.ctx.sampleRate;
-    const targetProjectFrame = Math.floor(timeSec * sampleRate);
+    const targetProjectFrame = Math.max(0, Math.floor(timeSec * sampleRate));
+
+    // Immediately update current project frame and fire onTimeUpdate so UI playhead updates instantly
+    this.currentProjectFrame = targetProjectFrame;
+    this.callbacks.onTimeUpdate(timeSec, targetProjectFrame);
 
     // Reset buffer pool and track source read positions
     this.bufferPool.resetAll();
@@ -526,27 +633,28 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
     track.header = null;
     track.resamplerState = null;
 
-    // 5. Read blob and validate format/header
-    let rawBytes: Uint8Array;
+    // 5. Read bounded 64KB slice to detect format and validate header without materializing full file
+    let headerBytes: Uint8Array;
+    const headerSliceSize = Math.min(newBlob.size, 65536);
     try {
-      const arrayBuf = await newBlob.arrayBuffer();
-      rawBytes = new Uint8Array(arrayBuf);
+      const arrayBuf = await newBlob.slice(0, headerSliceSize).arrayBuffer();
+      headerBytes = new Uint8Array(arrayBuf);
     } catch (err: unknown) {
       track.active = false;
-      throw new HotSwapDecodeError(trackIndex, 'Failed to read Blob arrayBuffer', err);
+      throw new HotSwapDecodeError(trackIndex, 'Failed to read Blob header slice', err);
     }
 
-    if (rawBytes.length < 16) {
+    if (headerBytes.length < 16) {
       track.active = false;
-      throw new HotSwapDecodeError(trackIndex, `Corrupted or truncated file: length ${rawBytes.length} < 16 bytes`);
+      throw new HotSwapDecodeError(trackIndex, `Corrupted or truncated file: length ${headerBytes.length} < 16 bytes`);
     }
 
-    // Format detection
-    const isWav = rawBytes[0] === 0x52 && rawBytes[1] === 0x49 && rawBytes[2] === 0x46 && rawBytes[3] === 0x46; // RIFF
-    const isMp3 = (rawBytes[0] === 0x49 && rawBytes[1] === 0x44 && rawBytes[2] === 0x33) ||
-                  (rawBytes[0] === 0xFF && (rawBytes[1] & 0xE0) === 0xE0);
-    const isAac = (rawBytes.length >= 8 && rawBytes[4] === 0x66 && rawBytes[5] === 0x74 && rawBytes[6] === 0x79 && rawBytes[7] === 0x70) ||
-                  (rawBytes[0] === 0xFF && (rawBytes[1] & 0xF6) === 0xF0);
+    // Format detection from bounded header slice
+    const isWav = headerBytes[0] === 0x52 && headerBytes[1] === 0x49 && headerBytes[2] === 0x46 && headerBytes[3] === 0x46; // RIFF
+    const isMp3 = (headerBytes[0] === 0x49 && headerBytes[1] === 0x44 && headerBytes[2] === 0x33) ||
+                  (headerBytes[0] === 0xFF && (headerBytes[1] & 0xE0) === 0xE0);
+    const isAac = (headerBytes.length >= 8 && headerBytes[4] === 0x66 && headerBytes[5] === 0x79 && headerBytes[6] === 0x74 && headerBytes[7] === 0x70) ||
+                  (headerBytes[0] === 0xFF && (headerBytes[1] & 0xF6) === 0xF0);
 
     let decodedLeft: Float32Array;
     let decodedRight: Float32Array;
@@ -555,7 +663,7 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
     try {
       if (isWav) {
         track.format = 'wav';
-        const parsedHeader = parseWavHeader(rawBytes.buffer.slice(0) as ArrayBuffer);
+        const parsedHeader = parseWavHeader(headerBytes.buffer.slice(0) as ArrayBuffer, newBlob.size);
         track.header = parsedHeader;
         track.resamplerState = createResamplerState(parsedHeader.sampleRate, sampleRate);
         track.blob = newBlob;
@@ -584,25 +692,43 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
         decodedCount = preRollFrames;
       } else if (isMp3) {
         track.format = 'mp3';
-        parseMp3Frames(rawBytes);
+        // Read bounded slice and explicitly demux complete frame boundaries
+        const candidateBlob = newBlob.slice(0, Math.min(newBlob.size, 131072));
+        const candidateBytes = new Uint8Array(await candidateBlob.arrayBuffer());
+        const safeSlice = extractValidatedMp3FrameSlice(candidateBytes, 12000);
+        if (safeSlice.length === 0) {
+          throw new Error('No valid MP3 frames found in header');
+        }
+        // Explicitly validate all frames in the slice with the existing parser
+        parseMp3Frames(safeSlice);
+
         const decoder = new MpegStreamDecoder();
         await decoder.ready;
         track.decoder = decoder;
         track.blob = newBlob;
 
-        const res = await decoder.decode(rawBytes);
+        const res = await decoder.decode(safeSlice);
         decodedLeft = res.left;
         decodedRight = res.right;
         decodedCount = res.samplesDecoded;
       } else if (isAac) {
         track.format = 'aac';
-        parseAdtsFrames(rawBytes);
+        // Read bounded slice and explicitly demux complete ADTS frame boundaries
+        const candidateBlob = newBlob.slice(0, Math.min(newBlob.size, 131072));
+        const candidateBytes = new Uint8Array(await candidateBlob.arrayBuffer());
+        const safeSlice = extractValidatedAdtsFrameSlice(candidateBytes, 12000);
+        if (safeSlice.length === 0) {
+          throw new Error('No valid ADTS AAC frames found in header');
+        }
+        // Explicitly validate all frames in the slice with the existing parser
+        parseAdtsFrames(safeSlice);
+
         const decoder = new AacStreamDecoder();
         await decoder.ready;
         track.decoder = decoder;
         track.blob = newBlob;
 
-        const res = await decoder.decode(rawBytes);
+        const res = await decoder.decode(safeSlice);
         decodedLeft = res.left;
         decodedRight = res.right;
         decodedCount = res.samplesDecoded;
@@ -748,6 +874,16 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
         continue;
       }
 
+      // Check if track has already reached the end of its audio stream
+      if (track.sourceReadFrame >= track.header.totalSampleFrames) {
+        this.workletNode.port.postMessage({
+          type: 'track-eof',
+          trackIndex: track.index,
+          seekGeneration: this.trackSeekGenerations[track.index],
+        });
+        continue;
+      }
+
       // Check if track has available buffer pool credit
       if (!this.bufferPool.canAcquire(track.id)) {
         continue;
@@ -776,7 +912,7 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
         if (requestGen !== this.trackSeekGenerations[track.index]) {
           // Discard stale decode block and release staging buffer back to pool
           this.bufferPool.release(staging.id);
-          return;
+          continue;
         }
 
         track.sourceReadFrame += slice.framesRead;
@@ -792,11 +928,33 @@ registerProcessor('multi-output-probe-processor', MultiOutputProbeProcessor);
 
         // Measure ring-copy preparation performance
         const copyMarkStart = performance.now();
-        staging.leftView.set(outL);
-        staging.rightView.set(outR);
+
+        // Ensure staging views are valid, non-detached, and match stagingFrames
+        if (
+          !staging.leftBuffer ||
+          (staging.leftBuffer as unknown as { detached?: boolean }).detached ||
+          staging.leftBuffer.byteLength !== stagingFrames * 4 ||
+          staging.leftView.length !== stagingFrames
+        ) {
+          staging.leftBuffer = new ArrayBuffer(stagingFrames * 4);
+          staging.rightBuffer = new ArrayBuffer(stagingFrames * 4);
+          staging.leftView = new Float32Array(staging.leftBuffer);
+          staging.rightView = new Float32Array(staging.rightBuffer);
+        }
+
+        const framesToCopy = Math.min(outL.length, staging.leftView.length);
+        staging.leftView.subarray(0, framesToCopy).set(outL.subarray(0, framesToCopy));
+        staging.rightView.subarray(0, framesToCopy).set(outR.subarray(0, framesToCopy));
+
         const copyMarkDurationUs = (performance.now() - copyMarkStart) * 1000;
         this.ringCopyLatenciesUs.push(copyMarkDurationUs);
         if (this.ringCopyLatenciesUs.length > 100) this.ringCopyLatenciesUs.shift();
+
+        // Safety guard: if worklet was torn down during async read, release buffer cleanly
+        if (!this.workletNode) {
+          this.bufferPool.release(staging.id);
+          return;
+        }
 
         // Mark in-flight and transfer buffers to AudioWorklet (zero-copy handoff across postMessage)
         this.bufferPool.markInFlight(staging.id);

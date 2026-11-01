@@ -295,10 +295,12 @@ export class AudioEngine {
           console.warn(`Worklet routing connect error on ${track.id}:`, err);
         }
       }
-    }
 
-    // Attach streaming media if mediaSourceUrl is provided and not yet created
-    if (track.mediaSourceUrl) {
+      // Enforce single playback engine: disconnect and purge any legacy media elements
+      if (nodes.audioElement || nodes.mediaSourceNode) {
+        this.clearTrackMedia(track.id);
+      }
+    } else if (track.mediaSourceUrl) {
       this.attachTrackMedia(track.id, track.mediaSourceUrl, track.fileInfo?.durationSec);
     }
 
@@ -316,6 +318,8 @@ export class AudioEngine {
   ): void {
     if (this.streamingController) {
       this.streamingController.setTrackSource(index, blob, header);
+      // Ensure legacy elements are disconnected on this track
+      this.clearTrackMedia(trackId);
     }
   }
 
@@ -328,9 +332,15 @@ export class AudioEngine {
 
   /**
    * Configures an HTMLAudioElement streaming source connected to the track DSP chain (<20MB RAM)
+   * Strictly disabled when StreamingMixerController is present.
    */
   public attachTrackMedia(trackId: string, mediaUrl: string, durationSec?: number): void {
     if (!this.ctx) return;
+    if (this.streamingController) {
+      // In streaming mode, AudioWorklet is the only playback engine. Discard legacy media.
+      this.clearTrackMedia(trackId);
+      return;
+    }
     const nodes = this.trackNodesMap.get(trackId);
     if (!nodes) return;
 
@@ -360,7 +370,7 @@ export class AudioEngine {
   }
 
   /**
-   * Resets and cleans up a track's streaming audio element
+   * Resets and cleans up a track's streaming audio element and revokes any associated object URL
    */
   public clearTrackMedia(trackId: string): void {
     const nodes = this.trackNodesMap.get(trackId);
@@ -375,8 +385,26 @@ export class AudioEngine {
         nodes.source = null;
       }
       if (nodes.audioElement) {
-        nodes.audioElement.pause();
-        nodes.audioElement.src = '';
+        try {
+          nodes.audioElement.pause();
+          const src = nodes.audioElement.src;
+          if (src && src.startsWith('blob:')) {
+            URL.revokeObjectURL(src);
+          }
+          nodes.audioElement.src = '';
+          nodes.audioElement.load();
+        } catch {
+          // ignore
+        }
+        nodes.audioElement = null;
+      }
+      if (nodes.mediaSourceNode) {
+        try {
+          nodes.mediaSourceNode.disconnect();
+        } catch {
+          // ignore
+        }
+        nodes.mediaSourceNode = null;
       }
     }
   }
@@ -482,8 +510,8 @@ export class AudioEngine {
 
       const offset = this.pauseOffset;
 
-      // Path A: Streaming HTMLAudioElement (<20MB RAM for 60-min files)
-      if (track.mediaSourceUrl && nodes.audioElement) {
+      // Path A: Streaming HTMLAudioElement (used ONLY when AudioWorklet controller is not present)
+      if (!this.streamingController && track.mediaSourceUrl && nodes.audioElement) {
         nodes.audioElement.currentTime = offset;
         nodes.audioElement.playbackRate = 1.0;
         this.activeMediaElements.push(nodes.audioElement);
@@ -571,11 +599,15 @@ export class AudioEngine {
     const clamped = clamp(seconds, 0, this.duration);
     this.pauseOffset = clamped;
 
-    if (this.streamingController) {
+    const hasWorkletTracks = tracks.some(t => !!(t.sourceBlob && t.parsedHeader));
+
+    if (hasWorkletTracks && this.streamingController) {
       this.streamingController.seek(clamped);
+      this.callbacks.onTimeUpdate(clamped);
+      return;
     }
 
-    // Direct seeking on all active media elements
+    // Direct seeking on legacy media elements (only when streaming controller is absent)
     this.trackNodesMap.forEach(nodes => {
       if (nodes.audioElement) {
         nodes.audioElement.currentTime = clamped;
@@ -612,6 +644,23 @@ export class AudioEngine {
   public getCurrentTime(): number {
     if (!this.isPlaying) {
       return this.pauseOffset;
+    }
+
+    // Read hardware-synced time directly from AudioWorklet if active streaming tracks exist
+    if (this.streamingController && this.streamingController.hasActiveTracks() && this.isPlaying) {
+      const sampleRate = this.ctx ? this.ctx.sampleRate : 48000;
+      let pos = this.streamingController.getCurrentProjectFrame() / sampleRate;
+      if (this.isLooping && this.loopEnd > this.loopStart) {
+        const loopLen = this.loopEnd - this.loopStart;
+        if (pos >= this.loopEnd) {
+          pos = this.loopStart + ((pos - this.loopStart) % loopLen);
+        }
+      } else if (pos >= this.duration) {
+        pos = this.duration;
+        this.stop();
+        this.callbacks.onEnded();
+      }
+      return pos;
     }
 
     // Read hardware-synced time from master streaming element if present

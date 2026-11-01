@@ -145,67 +145,65 @@ export async function extractWaveformPeaksFromBlob(
     return peaks;
   }
 
-  const { dataChunkOffset, totalSampleFrames, blockAlign, bitsPerSample } = header;
+  const { dataChunkOffset, dataChunkSize, totalSampleFrames, blockAlign, bitsPerSample } = header;
   const framesPerBin = Math.max(1, Math.floor(totalSampleFrames / numBins));
-  const bytesPerSample = bitsPerSample / 8;
 
-  // Process in progressive steps to avoid freezing UI
-  const CHUNK_BINS = 30; // process 30 bins per step
-  for (let b = 0; b < numBins; b += CHUNK_BINS) {
-    const endBin = Math.min(numBins, b + CHUNK_BINS);
-    const startFrame = b * framesPerBin;
-    const endFrame = Math.min(totalSampleFrames, endBin * framesPerBin);
-    const sliceByteStart = dataChunkOffset + startFrame * blockAlign;
-    const sliceByteEnd = dataChunkOffset + endFrame * blockAlign;
+  // Sequential 1 MB slice processing: memory is strictly bounded to 1 MB at any point in time
+  const SLICE_SIZE = 1024 * 1024; // Exactly 1 MB
+  const framesPerSlice = Math.max(1, Math.floor(SLICE_SIZE / blockAlign));
+  const bytesPerSlice = framesPerSlice * blockAlign;
+  const totalPcmBytes = Math.min(file.size - dataChunkOffset, dataChunkSize);
 
-    const sliceBlob = file.slice(sliceByteStart, sliceByteEnd);
+  let currentByteOffset = dataChunkOffset;
+  let processedFrames = 0;
+  let sliceIndex = 0;
+
+  while (currentByteOffset < dataChunkOffset + totalPcmBytes) {
+    const bytesRemaining = (dataChunkOffset + totalPcmBytes) - currentByteOffset;
+    const currentSliceBytes = Math.min(bytesPerSlice, bytesRemaining);
+    const sliceBlob = file.slice(currentByteOffset, currentByteOffset + currentSliceBytes);
     const sliceBuffer = await sliceBlob.arrayBuffer();
     const sliceView = new DataView(sliceBuffer);
+    const sliceFrames = Math.floor(sliceBuffer.byteLength / blockAlign);
 
-    // Read samples in this slice
-    for (let currentBin = b; currentBin < endBin; currentBin++) {
-      const binFrameOffset = (currentBin - b) * framesPerBin;
-      const binFrames = Math.min(framesPerBin, Math.floor(sliceBuffer.byteLength / blockAlign) - binFrameOffset);
-      let minSample = 0;
-      let maxSample = 0;
-
-      // Sample a subset of frames per bin to keep processing instant
-      const stride = Math.max(1, Math.floor(binFrames / 32));
-      for (let f = 0; f < binFrames; f += stride) {
-        const byteOffset = (binFrameOffset + f) * blockAlign;
-        if (byteOffset + bytesPerSample <= sliceBuffer.byteLength) {
-          let sampleVal = 0;
-          if (bitsPerSample === 16) {
-            sampleVal = sliceView.getInt16(byteOffset, true) / 32768;
-          } else if (bitsPerSample === 24) {
-            // 24-bit signed PCM
-            const b0 = sliceView.getUint8(byteOffset);
-            const b1 = sliceView.getUint8(byteOffset + 1);
-            const b2 = sliceView.getInt8(byteOffset + 2);
-            const int24 = (b2 << 16) | (b1 << 8) | b0;
-            sampleVal = int24 / 8388608;
-          } else if (bitsPerSample === 32) {
-            sampleVal = sliceView.getFloat32(byteOffset, true);
-          }
-
-          if (sampleVal < minSample) minSample = sampleVal;
-          if (sampleVal > maxSample) maxSample = sampleVal;
-        }
+    // Stride of 16 frames delivers sub-millisecond execution per 1 MB slice
+    const stride = 16;
+    for (let f = 0; f < sliceFrames; f += stride) {
+      const byteOffset = f * blockAlign;
+      let sampleVal = 0;
+      if (bitsPerSample === 16) {
+        sampleVal = sliceView.getInt16(byteOffset, true) / 32768;
+      } else if (bitsPerSample === 24) {
+        const b0 = sliceView.getUint8(byteOffset);
+        const b1 = sliceView.getUint8(byteOffset + 1);
+        const b2 = sliceView.getInt8(byteOffset + 2);
+        sampleVal = ((b2 << 16) | (b1 << 8) | b0) / 8388608;
+      } else if (bitsPerSample === 32) {
+        sampleVal = sliceView.getFloat32(byteOffset, true);
+      } else if (bitsPerSample === 8) {
+        sampleVal = (sliceView.getUint8(byteOffset) - 128) / 128;
       }
 
-      peaks[currentBin * 2] = minSample;
-      peaks[currentBin * 2 + 1] = maxSample;
+      const globalFrame = processedFrames + f;
+      const bin = Math.min(numBins - 1, Math.floor(globalFrame / framesPerBin));
+      if (sampleVal < peaks[bin * 2]) peaks[bin * 2] = sampleVal;
+      if (sampleVal > peaks[bin * 2 + 1]) peaks[bin * 2 + 1] = sampleVal;
     }
 
-    if (onProgress) {
-      onProgress(Math.round((endBin / numBins) * 100));
-    }
+    processedFrames += sliceFrames;
+    currentByteOffset += currentSliceBytes;
+    sliceIndex++;
 
-    // Cooperative scheduling: allow the JavaScriptCore event loop and garbage collector
-    // to reclaim intermediate slice buffers on mobile Safari
-    await new Promise(r => setTimeout(r, 0));
+    // Periodically yield to event loop to allow GC and keep UI responsive
+    if (sliceIndex % 8 === 0) {
+      if (onProgress) {
+        onProgress(Math.round(((currentByteOffset - dataChunkOffset) / totalPcmBytes) * 100));
+      }
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
 
+  if (onProgress) onProgress(100);
   return peaks;
 }
 

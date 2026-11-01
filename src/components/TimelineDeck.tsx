@@ -34,27 +34,46 @@ export const TimelineDeck: React.FC<TimelineDeckProps> = ({
 }) => {
   const rulerRef = useRef<HTMLDivElement>(null);
   const isScrubbingRef = useRef(false);
+  const [scrubTime, setScrubTime] = useState<number | null>(null);
 
   const safeDuration = Math.max(1, duration);
-  const playheadPercent = Math.min(100, Math.max(0, (currentTime / safeDuration) * 100));
+  const displayTime = scrubTime !== null ? scrubTime : currentTime;
+  const playheadPercent = Math.min(100, Math.max(0, (displayTime / safeDuration) * 100));
 
   const handlePointerDownRuler = (e: React.PointerEvent) => {
     if (!rulerRef.current) return;
     isScrubbingRef.current = true;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    handlePointerMoveRuler(e);
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    const rect = rulerRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+    const target = (x / rect.width) * safeDuration;
+    setScrubTime(target);
+    onSeek(target);
   };
 
   const handlePointerMoveRuler = (e: React.PointerEvent) => {
     if (!isScrubbingRef.current || !rulerRef.current) return;
     const rect = rulerRef.current.getBoundingClientRect();
     const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-    const fraction = x / rect.width;
-    onSeek(fraction * safeDuration);
+    const target = (x / rect.width) * safeDuration;
+    setScrubTime(target);
+    onSeek(target);
   };
 
   const handlePointerUpRuler = (e: React.PointerEvent) => {
+    if (!isScrubbingRef.current) return;
     isScrubbingRef.current = false;
+    if (rulerRef.current) {
+      const rect = rulerRef.current.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      const target = (x / rect.width) * safeDuration;
+      onSeek(target);
+    }
+    setScrubTime(null);
     try {
       (e.target as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {
@@ -197,8 +216,10 @@ const TrackTimelineRow: React.FC<TrackTimelineRowProps> = ({
     ctx.globalAlpha = 1.0;
   }, [track.peaks, track.color, track.mute]);
 
+  const hasAudio = Boolean(track.audioBuffer || track.sourceBlob || track.mediaSourceUrl || track.peaks);
+
   const handleLaneClick = (e: React.MouseEvent) => {
-    if (!laneRef.current || (!track.audioBuffer && !track.mediaSourceUrl)) return;
+    if (!laneRef.current || !hasAudio) return;
     const rect = laneRef.current.getBoundingClientRect();
     const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
     const fraction = x / rect.width;
@@ -336,7 +357,7 @@ const TrackTimelineRow: React.FC<TrackTimelineRowProps> = ({
             ? 'bg-blue-950/30 border-2 border-dashed border-blue-500/80'
             : 'bg-[#07090F]'
         }`}
-        title={track.audioBuffer ? 'Click to seek' : 'Click to upload WAV stem'}
+        title={hasAudio ? 'Click to seek' : 'Click to upload WAV stem'}
       >
         {/* Loading / Decoding Progress overlay */}
         {track.isDecoding && (

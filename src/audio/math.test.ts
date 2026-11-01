@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dbToGain, gainToDb, calculatePanGains, clamp, formatTimecode, formatBarsBeats, formatFileSize } from './math';
+import { dbToGain, gainToDb, calculatePanGains, calculateStereoPanGains, clamp, formatTimecode, formatBarsBeats, formatFileSize } from './math';
 
 test('dbToGain converts decibels accurately', () => {
   // 0 dB is linear unity gain 1.0
@@ -39,6 +39,33 @@ test('calculatePanGains implements constant-power panning', () => {
   const right = calculatePanGains(1);
   assert.equal(Math.round(right.leftGain * 1000) / 1000, 0.0);
   assert.equal(Math.round(right.rightGain * 1000) / 1000, 1.0);
+});
+
+test('calculateStereoPanGains implements stereo balance law preserving unity at center', () => {
+  // Stereo track (channels = 2) at Center (pan = 0): BOTH channels must be EXACTLY 1.0 (unity gain)
+  const centerStereo = calculateStereoPanGains(0, 2);
+  assert.equal(centerStereo.leftGain, 1.0);
+  assert.equal(centerStereo.rightGain, 1.0);
+
+  // Stereo track panned left (pan = -0.5): left stays 1.0, right is attenuated
+  const leftPanStereo = calculateStereoPanGains(-0.5, 2);
+  assert.equal(leftPanStereo.leftGain, 1.0);
+  assert.equal(Math.round(leftPanStereo.rightGain * 1000) / 1000, 0.707);
+
+  // Stereo track full left (pan = -1.0): left 1.0, right 0.0
+  const fullLeftStereo = calculateStereoPanGains(-1.0, 2);
+  assert.equal(fullLeftStereo.leftGain, 1.0);
+  assert.equal(fullLeftStereo.rightGain, 0.0);
+
+  // Stereo track panned right (pan = 0.5): right stays 1.0, left is attenuated
+  const rightPanStereo = calculateStereoPanGains(0.5, 2);
+  assert.equal(Math.round(rightPanStereo.leftGain * 1000) / 1000, 0.707);
+  assert.equal(rightPanStereo.rightGain, 1.0);
+
+  // Mono track (channels = 1) uses standard constant power (-3dB center)
+  const centerMono = calculateStereoPanGains(0, 1);
+  assert.equal(Math.round(centerMono.leftGain * 1000) / 1000, 0.707);
+  assert.equal(Math.round(centerMono.rightGain * 1000) / 1000, 0.707);
 });
 
 test('clamp confines numbers to ranges', () => {

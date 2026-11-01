@@ -52,11 +52,16 @@ export default function App() {
 
   // Initialize engine & empty project
   useEffect(() => {
+    let lastMeterTime = 0;
     const engine = new AudioEngine({
       onTimeUpdate: (time) => {
         setTransport(prev => ({ ...prev, currentTime: time }));
       },
       onMeterUpdate: (trackMeters, masterMeter) => {
+        const now = performance.now();
+        if (now - lastMeterTime < 40) return; // Cap meter state dispatch to ~25fps on mobile
+        lastMeterTime = now;
+
         setTracks(prevTracks =>
           prevTracks.map(t => {
             const m = trackMeters.find(item => item.id === t.id);
@@ -257,10 +262,7 @@ export default function App() {
         URL.revokeObjectURL(existingTrack.mediaSourceUrl);
       }
 
-      // Create streaming media URL from original file
-      const mediaSourceUrl = URL.createObjectURL(file);
-
-      // 2. Parse WAV RIFF header if available
+      // 1. Parse WAV RIFF header if available via bounded 64KB slice
       let header: ParsedWavHeader | null = null;
       let fileDuration = 0;
       try {
@@ -271,12 +273,14 @@ export default function App() {
         header = null;
       }
 
-      // 3. For non-WAV formats (MP3, AAC, M4A), probe duration via HTMLAudioElement metadata
+      // 2. For non-WAV formats (MP3, AAC, M4A), probe duration with temporary probe element and revoke immediately
+      let mediaSourceUrl: string | undefined = undefined;
       if (!header || fileDuration <= 0) {
+        const probeUrl = URL.createObjectURL(file);
         fileDuration = await new Promise<number>((resolve) => {
           const probe = new Audio();
           probe.preload = 'metadata';
-          probe.src = mediaSourceUrl;
+          probe.src = probeUrl;
           const onMeta = () => {
             cleanup();
             resolve(probe.duration && isFinite(probe.duration) ? probe.duration : 60);
@@ -288,26 +292,28 @@ export default function App() {
           const cleanup = () => {
             probe.removeEventListener('loadedmetadata', onMeta);
             probe.removeEventListener('error', onErr);
+            URL.revokeObjectURL(probeUrl);
           };
           probe.addEventListener('loadedmetadata', onMeta);
           probe.addEventListener('error', onErr);
         });
       }
 
-      // 4. Extract downsampled peak envelope (compact 600 bins = ~4.8KB RAM)
+      // 3. Extract downsampled peak envelope via sequential 1 MB slices (constant memory footprint)
       const peaks = await extractWaveformPeaksFromBlob(file, 600, pct => {
         setTracks(prev =>
           prev.map(t => (t.id === trackId ? { ...t, decodeProgress: Math.round(pct) } : t))
         );
       });
 
-      // 5. Connect streaming audio source to Web Audio DSP engine (<20MB RAM)
+      // 4. Connect streaming audio source to Web Audio DSP engine
       if (engineRef.current) {
         const trackIndex = ['track-1', 'track-2', 'track-3', 'track-4'].indexOf(trackId);
         if (trackIndex >= 0 && header) {
           engineRef.current.attachStreamingWavTrack(trackIndex, trackId, file, header);
+        } else if (mediaSourceUrl) {
+          engineRef.current.attachTrackMedia(trackId, mediaSourceUrl, fileDuration);
         }
-        engineRef.current.attachTrackMedia(trackId, mediaSourceUrl, fileDuration);
         engineRef.current.setDuration(Math.max(engineRef.current.getDuration(), fileDuration));
         engineRef.current.setLoop(transport.isLooping, transport.loopStart, Math.max(transport.loopEnd, fileDuration));
       }
@@ -420,7 +426,7 @@ export default function App() {
     }));
   }, []);
 
-  const hasTracksLoaded = tracks.some(t => Boolean(t.audioBuffer || t.mediaSourceUrl));
+  const hasTracksLoaded = tracks.some(t => Boolean(t.audioBuffer || t.sourceBlob || t.mediaSourceUrl || t.peaks));
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#080B10] text-slate-100 font-sans">

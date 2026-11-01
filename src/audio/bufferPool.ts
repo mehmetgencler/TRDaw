@@ -73,6 +73,23 @@ export class BoundedBufferPool {
     const buf = this.buffers.find(b => b.trackId === trackId && b.state === 'FREE');
     if (!buf) return null;
 
+    // Safety guard against detached or size-mismatched ArrayBuffers
+    const targetBytes = this.framesPerBuffer * 4;
+    if (
+      !buf.leftBuffer ||
+      (buf.leftBuffer as unknown as { detached?: boolean }).detached ||
+      buf.leftBuffer.byteLength !== targetBytes ||
+      !buf.rightBuffer ||
+      (buf.rightBuffer as unknown as { detached?: boolean }).detached ||
+      buf.rightBuffer.byteLength !== targetBytes ||
+      buf.leftView.length !== this.framesPerBuffer
+    ) {
+      buf.leftBuffer = new ArrayBuffer(targetBytes);
+      buf.rightBuffer = new ArrayBuffer(targetBytes);
+      buf.leftView = new Float32Array(buf.leftBuffer);
+      buf.rightView = new Float32Array(buf.rightBuffer);
+    }
+
     buf.state = 'DECODING';
     const current = this.trackInFlightCount.get(trackId) ?? 0;
     this.trackInFlightCount.set(trackId, current + 1);
@@ -97,11 +114,24 @@ export class BoundedBufferPool {
     const buf = this.buffers.find(b => b.id === bufferId);
     if (!buf) return;
 
-    if (newLeftBuffer && newRightBuffer) {
+    const targetBytes = this.framesPerBuffer * 4;
+    if (
+      newLeftBuffer &&
+      newRightBuffer &&
+      !(newLeftBuffer as unknown as { detached?: boolean }).detached &&
+      !(newRightBuffer as unknown as { detached?: boolean }).detached &&
+      newLeftBuffer.byteLength === targetBytes &&
+      newRightBuffer.byteLength === targetBytes
+    ) {
       buf.leftBuffer = newLeftBuffer;
       buf.rightBuffer = newRightBuffer;
       buf.leftView = new Float32Array(newLeftBuffer);
       buf.rightView = new Float32Array(newRightBuffer);
+    } else {
+      buf.leftBuffer = new ArrayBuffer(targetBytes);
+      buf.rightBuffer = new ArrayBuffer(targetBytes);
+      buf.leftView = new Float32Array(buf.leftBuffer);
+      buf.rightView = new Float32Array(buf.rightBuffer);
     }
 
     buf.state = 'FREE';
@@ -113,8 +143,22 @@ export class BoundedBufferPool {
    * Resets all staging buffers for all tracks to FREE.
    */
   public resetAll(): void {
+    const targetBytes = this.framesPerBuffer * 4;
     for (const buf of this.buffers) {
       buf.state = 'FREE';
+      if (
+        !buf.leftBuffer ||
+        (buf.leftBuffer as unknown as { detached?: boolean }).detached ||
+        buf.leftBuffer.byteLength !== targetBytes ||
+        !buf.rightBuffer ||
+        (buf.rightBuffer as unknown as { detached?: boolean }).detached ||
+        buf.rightBuffer.byteLength !== targetBytes
+      ) {
+        buf.leftBuffer = new ArrayBuffer(targetBytes);
+        buf.rightBuffer = new ArrayBuffer(targetBytes);
+        buf.leftView = new Float32Array(buf.leftBuffer);
+        buf.rightView = new Float32Array(buf.rightBuffer);
+      }
     }
     for (const key of this.trackInFlightCount.keys()) {
       this.trackInFlightCount.set(key, 0);
@@ -125,9 +169,23 @@ export class BoundedBufferPool {
    * Resets staging buffers and in-flight count for a specific track to FREE.
    */
   public flushTrack(trackId: string): void {
+    const targetBytes = this.framesPerBuffer * 4;
     for (const buf of this.buffers) {
       if (buf.trackId === trackId) {
         buf.state = 'FREE';
+        if (
+          !buf.leftBuffer ||
+          (buf.leftBuffer as unknown as { detached?: boolean }).detached ||
+          buf.leftBuffer.byteLength !== targetBytes ||
+          !buf.rightBuffer ||
+          (buf.rightBuffer as unknown as { detached?: boolean }).detached ||
+          buf.rightBuffer.byteLength !== targetBytes
+        ) {
+          buf.leftBuffer = new ArrayBuffer(targetBytes);
+          buf.rightBuffer = new ArrayBuffer(targetBytes);
+          buf.leftView = new Float32Array(buf.leftBuffer);
+          buf.rightView = new Float32Array(buf.rightBuffer);
+        }
       }
     }
     this.trackInFlightCount.set(trackId, 0);

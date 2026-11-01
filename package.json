@@ -9,9 +9,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "npm run test:phase1 && npm run test:phase2 && npm run test:legacy",
-    "test:phase1": "echo \"--- Running Phase 1 / 1.5 Active Engine Test Suite ---\" && tsx --test src/audio/phase1Acceptance.test.ts src/audio/playbackSync.test.ts src/audio/math.test.ts src/audio/wavParser.test.ts src/audio/wavEncoder.test.ts",
-    "test:phase2": "echo \"--- Running Phase 2 Active Engine Test Suite ---\" && tsx --test src/audio/phase2Acceptance.test.ts",
+    "test": "npm run test:phase1 && npm run test:phase2 && npm run test:ios && npm run test:legacy",
+    "test:phase1": "echo \"--- Running Phase 1 / 1.5 Active Engine Test Suite ---\" && tsx --test src/audio/phase1Acceptance.test.ts src/audio/playbackSync.test.ts src/audio/math.test.ts src/audio/wavParser.test.ts src/audio/wavEncoder.test.ts src/audio/mixdownExportVerification.test.ts",
+    "test:phase2": "echo \"--- Running Phase 2 Active Engine Test Suite ---\" && tsx --test src/audio/phase2Acceptance.test.ts src/audio/transportSeek.test.ts",
+    "test:ios": "echo \"--- Running iOS 18.7 Safari 4-Track Diagnosis & Fix Test Suite ---\" && tsx --test src/audio/iosPlaybackDiagnosis.test.ts",
     "test:legacy": "echo \"--- Running Legacy Drift Simulation Test Suite ---\" && tsx --test src/audio/legacyDrift.test.ts"
   },
   "dependencies": {

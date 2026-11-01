@@ -121,22 +121,32 @@ export function createResamplerState(srcSampleRate: number, dstSampleRate: numbe
  * and exact fractional phase and history preservation across 1-second block boundaries.
  * Returns output stereo Float32 arrays of length targetFrameCount.
  */
+export interface ResampleBlockResult {
+  outL: Float32Array;
+  outR: Float32Array;
+  framesConsumed: number;
+}
+
 export function resamplePcmBlock(
   srcL: Float32Array,
   srcR: Float32Array,
   srcValidFrames: number,
   targetFrameCount: number,
   state: ResamplerState
-): { outL: Float32Array; outR: Float32Array } {
+): ResampleBlockResult {
   const outL = new Float32Array(targetFrameCount);
   const outR = new Float32Array(targetFrameCount);
+
+  if (targetFrameCount === 0) {
+    return { outL, outR, framesConsumed: 0 };
+  }
 
   // Identity passthrough if rates match and no fractional phase offset
   if (state.srcSampleRate === state.dstSampleRate && state.phase === 0.0) {
     const copyFrames = Math.min(srcValidFrames, targetFrameCount);
     outL.set(srcL.subarray(0, copyFrames));
     outR.set(srcR.subarray(0, copyFrames));
-    return { outL, outR };
+    return { outL, outR, framesConsumed: copyFrames };
   }
 
   const L = POLYPHASE_SUBPHASES;
@@ -156,6 +166,7 @@ export function resamplePcmBlock(
   const histL = state.historyL;
   const histR = state.historyR;
   const ratio = state.srcSampleRate / state.dstSampleRate;
+  // Fractional phase [0, 1) - zero is valid!
   let srcPos = state.phase;
 
   // Polyphase interpolation loop
@@ -198,19 +209,29 @@ export function resamplePcmBlock(
     srcPos += ratio;
   }
 
-  // Update history buffers with last K samples from current source block
-  if (srcValidFrames >= K) {
-    histL.set(srcL.subarray(srcValidFrames - K, srcValidFrames));
-    histR.set(srcR.subarray(srcValidFrames - K, srcValidFrames));
-  } else if (srcValidFrames > 0) {
-    histL.copyWithin(0, srcValidFrames);
-    histL.set(srcL.subarray(0, srcValidFrames), K - srcValidFrames);
-    histR.copyWithin(0, srcValidFrames);
-    histR.set(srcR.subarray(0, srcValidFrames), K - srcValidFrames);
+  // Exact integer source frames consumed by this output block
+  const framesConsumed = Math.floor(srcPos);
+
+  // Exact fractional phase in [0, 1) for the next block (zero is completely valid)
+  let nextPhase = srcPos - framesConsumed;
+  if (nextPhase < 0 || Math.abs(nextPhase) < 1e-12) {
+    nextPhase = 0.0;
+  } else if (nextPhase >= 1.0) {
+    nextPhase = 0.0;
+  }
+  state.phase = nextPhase;
+
+  // Update history buffers with the last K samples immediately preceding framesConsumed
+  const validConsumed = Math.min(framesConsumed, srcValidFrames);
+  if (validConsumed >= K) {
+    histL.set(srcL.subarray(validConsumed - K, validConsumed));
+    histR.set(srcR.subarray(validConsumed - K, validConsumed));
+  } else if (validConsumed > 0) {
+    histL.copyWithin(0, validConsumed);
+    histL.set(srcL.subarray(0, validConsumed), K - validConsumed);
+    histR.copyWithin(0, validConsumed);
+    histR.set(srcR.subarray(0, validConsumed), K - validConsumed);
   }
 
-  // Carry remaining fractional phase into next block
-  state.phase = srcPos - srcValidFrames;
-
-  return { outL, outR };
+  return { outL, outR, framesConsumed };
 }

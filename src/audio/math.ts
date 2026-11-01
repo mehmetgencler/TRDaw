@@ -40,6 +40,44 @@ export function calculatePanGains(pan: number): { leftGain: number; rightGain: n
 }
 
 /**
+ * Stereo Balance / Panning Law
+ * - For mono tracks (channels <= 1): uses constant-power (-3dB center) panning.
+ * - For stereo tracks (channels > 1): uses stereo balance panning where center (pan = 0)
+ *   preserves exact unity gain (1.0 / 0 dB) on both channels, eliminating unwanted -3dB attenuation.
+ *   pan < 0 attenuates right channel while keeping left channel at 1.0;
+ *   pan > 0 attenuates left channel while keeping right channel at 1.0.
+ */
+export function calculateStereoPanGains(pan: number, channels: number = 2): { leftGain: number; rightGain: number } {
+  const clampedPan = Math.max(-1, Math.min(1, pan));
+  if (channels <= 1) {
+    return calculatePanGains(clampedPan);
+  }
+  // Stereo balance law: exact unity gain at center (0 dB attenuation)
+  if (clampedPan === 0) {
+    return { leftGain: 1.0, rightGain: 1.0 };
+  }
+  if (clampedPan <= -1) {
+    return { leftGain: 1.0, rightGain: 0.0 };
+  }
+  if (clampedPan >= 1) {
+    return { leftGain: 0.0, rightGain: 1.0 };
+  }
+  if (clampedPan < 0) {
+    // Panned left: left channel stays 1.0, right channel is attenuated
+    return {
+      leftGain: 1.0,
+      rightGain: Math.cos((-clampedPan) * (Math.PI / 2)),
+    };
+  } else {
+    // Panned right: right channel stays 1.0, left channel is attenuated
+    return {
+      leftGain: Math.cos(clampedPan * (Math.PI / 2)),
+      rightGain: 1.0,
+    };
+  }
+}
+
+/**
  * Clamps a number between min and max
  */
 export function clamp(val: number, min: number, max: number): number {

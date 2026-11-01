@@ -20,30 +20,25 @@ export const PeakMeterLadder: React.FC<PeakMeterLadderProps> = ({
   const [hasClipped, setHasClipped] = useState(false);
   const clipTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Peak hold logic
+  // Peak hold logic: update peak without recursive effect loops
   useEffect(() => {
-    if (peakL > holdL) {
-      setHoldL(peakL);
-    } else {
-      const timer = setTimeout(() => {
-        setHoldL(prev => Math.max(0, prev * 0.95));
-      }, 50);
-      return () => clearTimeout(timer);
-    }
-  }, [peakL, holdL]);
+    setHoldL(prev => Math.max(prev, peakL));
+  }, [peakL]);
 
   useEffect(() => {
     if (isStereo && peakR !== undefined) {
-      if (peakR > holdR) {
-        setHoldR(peakR);
-      } else {
-        const timer = setTimeout(() => {
-          setHoldR(prev => Math.max(0, prev * 0.95));
-        }, 50);
-        return () => clearTimeout(timer);
-      }
+      setHoldR(prev => Math.max(prev, peakR));
     }
-  }, [peakR, holdR, isStereo]);
+  }, [peakR, isStereo]);
+
+  // Gentle periodic peak decay
+  useEffect(() => {
+    const decayTimer = setInterval(() => {
+      setHoldL(prev => (prev > 0.01 ? prev * 0.93 : 0));
+      setHoldR(prev => (prev > 0.01 ? prev * 0.93 : 0));
+    }, 80);
+    return () => clearInterval(decayTimer);
+  }, []);
 
   // Clip indicator
   useEffect(() => {

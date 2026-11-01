@@ -20,10 +20,10 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
     this.isSeeking = false;
     this.minPreRollFrames = 12000; // ~0.25s pre-roll threshold
     this.tracks = [
-      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false },
-      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false },
-      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false },
-      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false },
+      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false, eof: false },
+      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false, eof: false },
+      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false, eof: false },
+      { left: new Float32Array(this.ringCapacity), right: new Float32Array(this.ringCapacity), readIdx: 0, writeIdx: 0, available: 0, active: false, eof: false },
     ];
     this.isPlaying = false;
     this.projectFrame = 0;
@@ -50,6 +50,19 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
             this.tracks[i].readIdx = 0;
             this.tracks[i].writeIdx = 0;
             this.tracks[i].available = 0;
+            this.tracks[i].eof = false;
+          }
+        }
+        break;
+      }
+      case 'track-eof': {
+        const { trackIndex, seekGeneration } = data;
+        const expectedGen = (this.trackSeekGenerations && this.trackSeekGenerations[trackIndex] !== undefined)
+          ? this.trackSeekGenerations[trackIndex]
+          : this.currentSeekGeneration;
+        if (seekGeneration === undefined || seekGeneration === expectedGen) {
+          if (trackIndex >= 0 && trackIndex < 4) {
+            this.tracks[trackIndex].eof = true;
           }
         }
         break;
@@ -149,10 +162,12 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
           }
         }
         this.projectFrame = Math.max(0, Math.floor(data.projectFrame || 0));
+        this.lastReportFrame = this.projectFrame;
         for (let i = 0; i < 4; i++) {
           this.tracks[i].readIdx = 0;
           this.tracks[i].writeIdx = 0;
           this.tracks[i].available = 0;
+          this.tracks[i].eof = false;
           this.tracks[i].left.fill(0);
           this.tracks[i].right.fill(0);
         }
@@ -173,6 +188,7 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
           this.tracks[trackIdx].readIdx = 0;
           this.tracks[trackIdx].writeIdx = 0;
           this.tracks[trackIdx].available = 0;
+          this.tracks[trackIdx].eof = false;
           this.tracks[trackIdx].left.fill(0);
           this.tracks[trackIdx].right.fill(0);
         }
@@ -202,10 +218,24 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
           this.tracks[i].readIdx = 0;
           this.tracks[i].writeIdx = 0;
           this.tracks[i].available = 0;
+          this.tracks[i].eof = false;
           this.tracks[i].left.fill(0);
           this.tracks[i].right.fill(0);
         }
         break;
+      }
+    }
+  }
+
+  zeroFill(outputs, isSingleOutputFallback, numOutputs) {
+    if (isSingleOutputFallback) {
+      for (let ch = 0; ch < outputs[0].length; ch++) {
+        if (outputs[0][ch]) outputs[0][ch].fill(0);
+      }
+    } else {
+      for (let o = 0; o < numOutputs; o++) {
+        if (outputs[o][0]) outputs[o][0].fill(0);
+        if (outputs[o][1]) outputs[o][1].fill(0);
       }
     }
   }
@@ -215,30 +245,16 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
     const isSingleOutputFallback = (numOutputs === 1 && outputs[0] && outputs[0].length >= 8);
     const quantum = outputs[0] && outputs[0][0] ? outputs[0][0].length : 128;
 
-    // Helper to zero-fill all configured outputs
-    const zeroFillOutputs = () => {
-      if (isSingleOutputFallback) {
-        for (let ch = 0; ch < outputs[0].length; ch++) {
-          if (outputs[0][ch]) outputs[0][ch].fill(0);
-        }
-      } else {
-        for (let o = 0; o < numOutputs; o++) {
-          if (outputs[o][0]) outputs[o][0].fill(0);
-          if (outputs[o][1]) outputs[o][1].fill(0);
-        }
-      }
-    };
-
     if (!this.isPlaying) {
-      zeroFillOutputs();
+      this.zeroFill(outputs, isSingleOutputFallback, numOutputs);
       return true;
     }
 
-    // Pre-roll gating: If seeking, wait until all active tracks reach minPreRollFrames
+    // Pre-roll gating: If seeking, wait until all active non-EOF tracks reach minPreRollFrames
     if (this.isSeeking) {
       let allReady = true;
       for (let i = 0; i < 4; i++) {
-        if (this.tracks[i].active && this.tracks[i].available < this.minPreRollFrames) {
+        if (this.tracks[i].active && !this.tracks[i].eof && this.tracks[i].available < this.minPreRollFrames) {
           allReady = false;
           break;
         }
@@ -246,7 +262,7 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
       if (allReady) {
         this.isSeeking = false;
       } else {
-        zeroFillOutputs();
+        this.zeroFill(outputs, isSingleOutputFallback, numOutputs);
         return true;
       }
     }
@@ -255,7 +271,7 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
     let underrunTrack = -1;
 
     for (let i = 0; i < 4; i++) {
-      if (this.tracks[i].active && this.tracks[i].available < quantum) {
+      if (this.tracks[i].active && !this.tracks[i].eof && this.tracks[i].available < quantum) {
         hasUnderrun = true;
         underrunTrack = i;
         break;
@@ -263,7 +279,7 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
     }
 
     if (hasUnderrun) {
-      zeroFillOutputs();
+      this.zeroFill(outputs, isSingleOutputFallback, numOutputs);
       this.underrunCount++;
       if (this.underrunCount % 30 === 1) {
         this.port.postMessage({
@@ -293,7 +309,7 @@ class StreamingMixerProcessor extends AudioWorkletProcessor {
       if (!outL || !outR) continue;
       const t = this.tracks[i];
 
-      if (!t.active) {
+      if (!t.active || (t.eof && t.available < quantum)) {
         outL.fill(0);
         outR.fill(0);
       } else {

@@ -14,11 +14,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   master,
   onClose,
 }) => {
+  // Detect native sample rate from loaded tracks
+  const detectedRate = (tracks.find(t => t.fileInfo?.sampleRate)?.fileInfo?.sampleRate ||
+    tracks.find(t => t.audioBuffer)?.audioBuffer?.sampleRate ||
+    48000) as 44100 | 48000;
+
   const [settings, setSettings] = useState<ExportSettings>({
     format: 'wav-24',
-    sampleRate: 48000,
-    range: 'full',
-    normalize: true,
+    sampleRate: detectedRate === 44100 ? 44100 : 48000,
+    range: 'preview-5m',
+    normalize: false,
+    bypassCompressors: true,
+    bypassLimiter: true,
   });
 
   const maxTrackDuration = tracks.reduce((max, t) => {
@@ -176,20 +183,47 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               </div>
             </div>
 
-            {/* Normalization */}
-            <div className="flex flex-col gap-1.5">
-              <label className="text-slate-300 font-semibold uppercase tracking-wider text-[10px]">
-                Master Peak Guard
-              </label>
-              <label className="flex items-center gap-2 p-1.5 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={settings.normalize}
-                  onChange={e => setSettings({ ...settings, normalize: e.target.checked })}
-                  className="rounded text-emerald-500 focus:ring-0 bg-slate-800 border-slate-700"
-                />
-                <span className="text-slate-300">Normalize to -0.2 dBFS</span>
-              </label>
+            {/* Dynamics & Mastering Overrides */}
+            <div className="flex flex-col gap-1.5 col-span-2">
+              <div className="flex items-center justify-between">
+                <label className="text-slate-300 font-semibold uppercase tracking-wider text-[10px]">
+                  Mixdown Dynamics & Limiting
+                </label>
+                <span className="text-[10px] text-emerald-400 font-mono">
+                  {settings.bypassCompressors && settings.bypassLimiter ? 'Clean / Transparent Export' : 'Mastering DSP Active'}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex items-center gap-2 p-2 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={!settings.bypassCompressors}
+                    onChange={e => setSettings({ ...settings, bypassCompressors: !e.target.checked })}
+                    className="rounded text-emerald-500 focus:ring-0 bg-slate-800 border-slate-700"
+                  />
+                  <div className="flex flex-col">
+                    <span className="text-slate-300 font-medium">Track Compressors</span>
+                    <span className="text-[10px] text-slate-500">
+                      {settings.bypassCompressors ? 'Bypassed (Clean)' : 'Active dynamics'}
+                    </span>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-2 p-2 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={!settings.bypassLimiter}
+                    onChange={e => setSettings({ ...settings, bypassLimiter: !e.target.checked })}
+                    className="rounded text-emerald-500 focus:ring-0 bg-slate-800 border-slate-700"
+                  />
+                  <div className="flex flex-col">
+                    <span className="text-slate-300 font-medium">Master Limiter</span>
+                    <span className="text-[10px] text-slate-500">
+                      {settings.bypassLimiter ? 'Bypassed (Clean)' : 'Peak ceiling limiter'}
+                    </span>
+                  </div>
+                </label>
+              </div>
             </div>
           </div>
 

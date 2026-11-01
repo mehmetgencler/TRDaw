@@ -84,4 +84,8 @@ export interface ExportSettings {
   customStart?: number;
   customEnd?: number;
   normalize: boolean;
+  bypassCompressors?: boolean; // When true, bypasses all track compressors
+  bypassLimiter?: boolean;     // When true, bypasses master limiter & saturation
+  bypassDither?: boolean;      // When true, disables TPDF dither for bit-exact PCM export
 }
+
